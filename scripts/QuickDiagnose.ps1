@@ -4,6 +4,7 @@
 .DESCRIPTION
     Runs natively on Windows 10 PowerShell 5.1 without compiling.
     Takes 5 repeated hardware samples to diagnose sustained CPU and memory bottlenecks.
+    Strictly read-only; never touches personal files or Microsoft Office.
 #>
 
 [CmdletBinding()]
@@ -42,7 +43,7 @@ Write-Host "`n--- [2/4] MICROSOFT OFFICE INTEGRITY CHECK ---" -ForegroundColor C
 $officeSvc = Get-Service -Name "ClickToRunSvc" -ErrorAction SilentlyContinue
 if ($officeSvc) {
     Write-Host "  Microsoft Office Service (ClickToRunSvc): $($officeSvc.Status) (StartType: $($officeSvc.StartType))" -ForegroundColor Green
-    Write-Host "  [Safety Verified] Office services and Click-to-Run processes are fully preserved." -ForegroundColor DarkGray
+    Write-Host "  [Safety Verified] Office Click-to-Run services and background synchronization are protected." -ForegroundColor DarkGray
 } else {
     Write-Host "  ClickToRunSvc service not detected in standard location." -ForegroundColor Yellow
 }
@@ -58,9 +59,8 @@ $procStats = @{}
 for ($i = 1; $i -le $samples; $i++) {
     $cpuLoad = (Get-CimInstance Win32_Processor).LoadPercentage
     $cpuLoadArray += $cpuLoad
-    Write-Host "  Sample $i/$samples: Total CPU Load = $cpuLoad%" -ForegroundColor DarkGray
+    Write-Host "  Sample $i/$samples: Total System CPU = $cpuLoad%" -ForegroundColor DarkGray
 
-    # Sample top processes by CPU time
     Get-Process | Where-Object { $_.Id -ne 0 -and $_.ProcessName -ne "Idle" } | ForEach-Object {
         $name = $_.ProcessName
         $cpuTime = $_.CPU
@@ -92,35 +92,43 @@ $avgCpu = [Math]::Round(($cpuLoadArray | Measure-Object -Average).Average, 1)
 $peakCpu = ($cpuLoadArray | Measure-Object -Maximum).Maximum
 
 Write-Host "`n  Diagnostic Results:" -ForegroundColor White
-Write-Host "  Average CPU Load: $avgCpu% (Peak: $peakCpu%)"
+Write-Host "  Average Total CPU Load: $avgCpu% (Peak: $peakCpu%)"
 
 $sustained = $procStats.Values | Where-Object { $_.CpuHits -ge 2 } | Sort-Object CpuHits -Descending
 if ($sustained.Count -gt 0) {
     Write-Host "`n  Persistent Resource Consumers Detected:" -ForegroundColor Yellow
     foreach ($p in $sustained) {
-        Write-Host "   • $($p.Name,-25) RAM: $($p.WorkingSetMb,5) MB | Sustained Activity: $($p.CpuHits)/$($samples-1) intervals"
+        Write-Host "   • $($p.Name,-25) RAM: $($p.WorkingSetMb,5) MB | Sustained in $($p.CpuHits)/$($samples-1) sample intervals"
     }
 } else {
     Write-Host "  No single process sustained abnormal background CPU load during the sampling window." -ForegroundColor Green
 }
 
-# 4. Safe Storage Analysis (Review-First)
+# 4. Safe Storage Analysis (Review-First, Reparse Points Excluded)
 Write-Host "`n--- [4/4] REVIEW-FIRST SAFE STORAGE ESTIMATE ---" -ForegroundColor Cyan
 $safePaths = @(
-    @{ Name = "User Temp"; Path = $env:TEMP },
-    @{ Name = "Windows Crash Dumps"; Path = "$env:LOCALAPPDATA\CrashDumps" },
-    @{ Name = "Windows System Temp"; Path = "$env:WINDIR\Temp" },
-    @{ Name = "Windows Update Cache"; Path = "$env:WINDIR\SoftwareDistribution\Download" }
+    @{ Name = "User Temp"; Path = $env:TEMP; Safe = $true },
+    @{ Name = "Windows Crash Dumps"; Path = "$env:LOCALAPPDATA\CrashDumps"; Safe = $true },
+    @{ Name = "Windows System Temp"; Path = "$env:WINDIR\Temp"; Safe = $true },
+    @{ Name = "Windows Update Cache"; Path = "$env:WINDIR\SoftwareDistribution\Download"; Safe = $false }
 )
 
 $totalReclaimableMb = 0.0
 foreach ($target in $safePaths) {
     if (Test-Path $target.Path) {
-        $files = Get-ChildItem -Path $target.Path -File -Recurse -Force -ErrorAction SilentlyContinue
+        # Exclude directory junctions and symbolic links
+        $files = Get-ChildItem -Path $target.Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+                 Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }
+
         $sizeBytes = ($files | Measure-Object -Property Length -Sum).Sum
         $sizeMb = [Math]::Round($sizeBytes / 1MB, 1)
-        $totalReclaimableMb += $sizeMb
-        Write-Host "  $($target.Name,-26) $($files.Count,5) files ($sizeMb MB)"
+
+        if ($target.Safe) {
+            $totalReclaimableMb += $sizeMb
+            Write-Host "  $($target.Name,-26) $($files.Count,5) files ($sizeMb MB) [Safe to Clean]"
+        } else {
+            Write-Host "  $($target.Name,-26) $($files.Count,5) files ($sizeMb MB) [Disabled — Use Windows Settings]" -ForegroundColor DarkYellow
+        }
     }
 }
 

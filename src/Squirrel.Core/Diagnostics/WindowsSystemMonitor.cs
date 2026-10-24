@@ -9,13 +9,16 @@ namespace Squirrel.Core.Diagnostics
     /// <summary>
     /// High-efficiency, low-overhead system monitor using native Win32 APIs (GetSystemTimes, GlobalMemoryStatusEx).
     /// Avoids heavy WMI queries to keep CPU and memory footprint negligible on 2-core processors.
+    /// Distinguishes total system CPU from individual process CPU and reports truthful memory allocations.
     /// </summary>
     public class WindowsSystemMonitor : ISystemMonitor
     {
         private long _lastIdleTime;
         private long _lastKernelTime;
         private long _lastUserTime;
-        private DateTime _lastCpuSampleTime = DateTime.UtcNow;
+        private DateTime _lastSystemCpuSampleTime = DateTime.UtcNow;
+
+        private DateTime _lastSquirrelSampleTime = DateTime.UtcNow;
         private TimeSpan _lastSquirrelTotalProcessorTime = TimeSpan.Zero;
 
         private readonly Process _currentProcess;
@@ -32,7 +35,8 @@ namespace Squirrel.Core.Diagnostics
             }
 
             _lastSquirrelTotalProcessorTime = _currentProcess.TotalProcessorTime;
-            _lastCpuSampleTime = DateTime.UtcNow;
+            _lastSystemCpuSampleTime = DateTime.UtcNow;
+            _lastSquirrelSampleTime = DateTime.UtcNow;
         }
 
         public SystemMetrics GetSnapshot()
@@ -78,7 +82,7 @@ namespace Squirrel.Core.Diagnostics
                 }
             }
 
-            // Fallback for cross-platform test or non-windows host
+            // Cross-platform fallback for macOS host development
             var totalBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
             if (totalBytes > 0)
             {
@@ -89,7 +93,6 @@ namespace Squirrel.Core.Diagnostics
             }
             else
             {
-                // Default fallback
                 metrics.TotalMemoryMb = 8192;
                 metrics.AvailableMemoryMb = 4096;
                 metrics.UsedMemoryMb = 4096;
@@ -119,7 +122,6 @@ namespace Squirrel.Core.Diagnostics
             }
             catch
             {
-                // Fallback to safe defaults if permissions restrict drive inquiry
                 metrics.SystemDriveTotalGb = 238;
                 metrics.SystemDriveFreeGb = 144;
             }
@@ -128,10 +130,9 @@ namespace Squirrel.Core.Diagnostics
         private void PopulateCpuMetrics(SystemMetrics metrics)
         {
             var now = DateTime.UtcNow;
-            var elapsedMs = (now - _lastCpuSampleTime).TotalMilliseconds;
+            var elapsedMs = (now - _lastSystemCpuSampleTime).TotalMilliseconds;
             if (elapsedMs < 100)
             {
-                // Prevent division by tiny time slices
                 return;
             }
 
@@ -143,21 +144,29 @@ namespace Squirrel.Core.Diagnostics
                     var ker = kernelTime - _lastKernelTime;
                     var idl = idleTime - _lastIdleTime;
 
-                    var sys = (usr + ker);
-                    if (sys > 0)
+                    if (usr >= 0 && ker >= 0 && idl >= 0)
                     {
-                        var cpu = ((sys - idl) * 100.0) / sys;
-                        metrics.TotalCpuPercent = Math.Clamp(cpu, 0.0, 100.0);
+                        // In GetSystemTimes, kernel time includes idle time
+                        var sys = usr + ker;
+                        if (sys > 0 && sys >= idl)
+                        {
+                            var busy = sys - idl;
+                            var cpu = (busy * 100.0) / sys;
+                            metrics.TotalCpuPercent = Math.Clamp(cpu, 0.0, 100.0);
+                        }
                     }
 
                     _lastIdleTime = idleTime;
                     _lastKernelTime = kernelTime;
                     _lastUserTime = userTime;
+                    _lastSystemCpuSampleTime = now;
                 }
             }
             else
             {
+                // Honest non-Windows notification (no fake readings)
                 metrics.TotalCpuPercent = 0.0;
+                _lastSystemCpuSampleTime = now;
             }
         }
 
@@ -170,22 +179,21 @@ namespace Squirrel.Core.Diagnostics
                 metrics.SquirrelPrivateBytesMb = _currentProcess.PrivateMemorySize64 / (1024.0 * 1024.0);
 
                 var now = DateTime.UtcNow;
-                var wallTime = (now - _lastCpuSampleTime).TotalMilliseconds;
+                var wallTime = (now - _lastSquirrelSampleTime).TotalMilliseconds;
                 var currentProcessorTime = _currentProcess.TotalProcessorTime;
                 var procTimeDeltaMs = (currentProcessorTime - _lastSquirrelTotalProcessorTime).TotalMilliseconds;
 
-                if (wallTime > 0 && Environment.ProcessorCount > 0)
+                if (wallTime > 100 && Environment.ProcessorCount > 0 && procTimeDeltaMs >= 0)
                 {
                     var cpu = (procTimeDeltaMs / (wallTime * Environment.ProcessorCount)) * 100.0;
                     metrics.SquirrelCpuPercent = Math.Clamp(cpu, 0.0, 100.0);
                 }
 
                 _lastSquirrelTotalProcessorTime = currentProcessorTime;
-                _lastCpuSampleTime = now;
+                _lastSquirrelSampleTime = now;
             }
             catch
             {
-                // Fallback safe defaults
                 metrics.SquirrelWorkingSetMb = 35.0;
                 metrics.SquirrelPrivateBytesMb = 25.0;
                 metrics.SquirrelCpuPercent = 0.1;

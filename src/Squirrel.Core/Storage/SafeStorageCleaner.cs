@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,11 +20,13 @@ namespace Squirrel.Core.Storage
         public List<string> Warnings { get; set; } = new List<string>();
         public bool IsDryRun { get; set; }
         public bool Succeeded { get; set; }
+        public string Summary { get; set; } = string.Empty;
     }
 
     /// <summary>
     /// Executes safe storage cleanup strictly upon explicit user approval.
-    /// Handles locked files gracefully and preserves personal data.
+    /// Resists path traversal, avoids symlink/junction recursion, tolerates in-use files,
+    /// verifies browser process state, and maintains accurate local audit records.
     /// </summary>
     public class SafeStorageCleaner
     {
@@ -48,10 +51,19 @@ namespace Squirrel.Core.Storage
                 IsDryRun = dryRun
             };
 
+            if (!target.IsSafeForCleanup)
+            {
+                result.Succeeded = false;
+                result.Warnings.Add($"Category disabled: {target.SafetyNotes}");
+                result.Summary = "Cleanup refused: Target category is disabled for direct deletion.";
+                return result;
+            }
+
             if (!userConfirmed && !dryRun)
             {
                 result.Succeeded = false;
                 result.Warnings.Add("Action aborted: Explicit user approval was not provided.");
+                result.Summary = "Aborted: User confirmation required.";
                 return result;
             }
 
@@ -59,6 +71,24 @@ namespace Squirrel.Core.Storage
             {
                 result.Succeeded = false;
                 result.Warnings.Add($"Safety Guard Block: {reason}");
+                result.Summary = $"Safety violation: {reason}";
+                return result;
+            }
+
+            // Check if active browser is running for browser caches
+            if (target.Name.IndexOf("Edge", StringComparison.OrdinalIgnoreCase) >= 0 && IsProcessActive("msedge"))
+            {
+                result.Succeeded = false;
+                result.Warnings.Add("Microsoft Edge is currently running. Please close Edge to prevent cache file lock errors.");
+                result.Summary = "Aborted: Close Microsoft Edge first.";
+                return result;
+            }
+
+            if (target.Name.IndexOf("Chrome", StringComparison.OrdinalIgnoreCase) >= 0 && IsProcessActive("chrome"))
+            {
+                result.Succeeded = false;
+                result.Warnings.Add("Google Chrome is currently running. Please close Chrome to prevent cache file lock errors.");
+                result.Summary = "Aborted: Close Google Chrome first.";
                 return result;
             }
 
@@ -66,6 +96,7 @@ namespace Squirrel.Core.Storage
             {
                 result.Succeeded = true;
                 result.Warnings.Add("Directory does not exist or was already cleaned.");
+                result.Summary = "Directory empty or not found.";
                 return result;
             }
 
@@ -78,8 +109,11 @@ namespace Squirrel.Core.Storage
             }, cancellationToken);
 
             result.Succeeded = true;
+            result.Summary = dryRun
+                ? $"[DRY RUN] Evaluated {result.DeletedFilesCount} candidate files ({result.DeletedMb:F1} MB). Zero files were deleted."
+                : $"Cleaned {result.DeletedFilesCount} files ({result.DeletedMb:F1} MB reclaimed). Skipped {result.SkippedFilesCount} in-use/protected files.";
 
-            // Log action in audit ledger if not a dry-run
+            // Log action in audit ledger only if not dry-run and files were processed
             if (!dryRun && _auditLedger != null && result.DeletedFilesCount > 0)
             {
                 await _auditLedger.RecordEntryAsync(new AuditEntry
@@ -87,7 +121,7 @@ namespace Squirrel.Core.Storage
                     ActionType = "StorageCleanup",
                     TargetName = target.Name,
                     TargetIdentifier = target.DirectoryPath,
-                    Description = $"Cleaned {result.DeletedFilesCount} files ({result.DeletedMb:F1} MB reclaimed). Skipped {result.SkippedFilesCount} in-use files.",
+                    Description = result.Summary,
                     PreviousState = $"{target.FileCount} files ({target.SizeMb:F1} MB)",
                     NewState = $"{result.SkippedFilesCount} files remaining",
                     IsReversible = false,
@@ -98,6 +132,21 @@ namespace Squirrel.Core.Storage
             return result;
         }
 
+        private static bool IsProcessActive(string processName)
+        {
+            try
+            {
+                var procs = Process.GetProcessesByName(processName);
+                var active = procs.Length > 0;
+                foreach (var p in procs) { try { p.Dispose(); } catch { } }
+                return active;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private static void DeleteDirectoryContentsSafely(
             DirectoryInfo rootDir,
             CleanupResult result,
@@ -106,15 +155,22 @@ namespace Squirrel.Core.Storage
         {
             try
             {
-                // Files in root
+                // Files directly inside root directory
                 foreach (var file in rootDir.EnumerateFiles())
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
+                        // Do not delete or follow symbolic links
+                        if ((file.Attributes & FileAttributes.ReparsePoint) != 0)
+                        {
+                            result.SkippedFilesCount++;
+                            continue;
+                        }
+
                         var length = file.Length;
 
-                        // Check if file is locked / in use by another process
+                        // Check if file is locked or in use by another process
                         bool isLocked = false;
                         try
                         {
@@ -143,7 +199,7 @@ namespace Squirrel.Core.Storage
                     }
                     catch (IOException)
                     {
-                        // File is currently locked / open by an active process — perfectly normal and safe to skip
+                        // In-use locked file — safe to skip
                         result.SkippedFilesCount++;
                     }
                     catch (UnauthorizedAccessException)
@@ -157,10 +213,18 @@ namespace Squirrel.Core.Storage
                     }
                 }
 
-                // Subdirectories in root
+                // Subdirectories in root — NEVER recurse into reparse points / directory junctions
                 foreach (var subDir in rootDir.EnumerateDirectories())
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+
+                    if ((subDir.Attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        // Directory junction or symlink — do NOT traverse into it
+                        result.SkippedFilesCount++;
+                        continue;
+                    }
+
                     DeleteSubdirectorySafely(subDir, result, dryRun, cancellationToken);
                 }
             }
@@ -178,14 +242,26 @@ namespace Squirrel.Core.Storage
         {
             try
             {
+                // Never recurse into directory junctions or symbolic links
+                if ((subDir.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    result.SkippedFilesCount++;
+                    return;
+                }
+
                 foreach (var file in subDir.EnumerateFiles())
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
+                        if ((file.Attributes & FileAttributes.ReparsePoint) != 0)
+                        {
+                            result.SkippedFilesCount++;
+                            continue;
+                        }
+
                         var length = file.Length;
 
-                        // Check if file is locked / in use by another process
                         bool isLocked = false;
                         try
                         {
@@ -225,10 +301,16 @@ namespace Squirrel.Core.Storage
                 foreach (var nested in subDir.EnumerateDirectories())
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if ((nested.Attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        result.SkippedFilesCount++;
+                        continue;
+                    }
+
                     DeleteSubdirectorySafely(nested, result, dryRun, cancellationToken);
                 }
 
-                // Delete directory if empty
+                // Delete directory if empty (never deletes root)
                 if (!dryRun)
                 {
                     try

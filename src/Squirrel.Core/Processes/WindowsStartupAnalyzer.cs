@@ -58,7 +58,14 @@ namespace Squirrel.Core.Processes
                         var command = key.GetValue(valueName)?.ToString() ?? string.Empty;
                         if (string.IsNullOrWhiteSpace(command)) continue;
 
-                        var item = CreateStartupItem(valueName, command, locationType, $@"{rootKey.Name}\{subKeyPath}");
+                        int kindInt = 1; // Default String (REG_SZ)
+                        try
+                        {
+                            kindInt = (int)key.GetValueKind(valueName);
+                        }
+                        catch { }
+
+                        var item = CreateStartupItem(valueName, command, locationType, $@"{rootKey.Name}\{subKeyPath}", subKeyPath, kindInt);
                         items.Add(item);
                     }
                     catch
@@ -87,7 +94,7 @@ namespace Squirrel.Core.Processes
                         var fileName = Path.GetFileName(file);
                         if (fileName.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)) continue;
 
-                        var item = CreateStartupItem(Path.GetFileNameWithoutExtension(fileName), file, locationType, folderPath);
+                        var item = CreateStartupItem(Path.GetFileNameWithoutExtension(fileName), file, locationType, folderPath, string.Empty, 1);
                         items.Add(item);
                     }
                     catch
@@ -102,7 +109,7 @@ namespace Squirrel.Core.Processes
             }
         }
 
-        private StartupItem CreateStartupItem(string name, string commandLine, StartupLocationType locationType, string locationPath)
+        private StartupItem CreateStartupItem(string name, string commandLine, StartupLocationType locationType, string locationPath, string subKeyPath, int valueKind)
         {
             var item = new StartupItem
             {
@@ -110,6 +117,8 @@ namespace Squirrel.Core.Processes
                 CommandLine = commandLine,
                 LocationType = locationType,
                 LocationPath = locationPath,
+                SubKeyPath = subKeyPath,
+                ValueKind = valueKind,
                 IsEnabled = true
             };
 
@@ -134,6 +143,16 @@ namespace Squirrel.Core.Processes
 
         private void AssessSafetyAndImpact(StartupItem item)
         {
+            // Transient RunOnce protection
+            if (item.IsRunOnce)
+            {
+                item.Category = "Transient Setup";
+                item.CanSafelyDisable = false;
+                item.SafetyExplanation = "RunOnce entry created by an installer or update to run once upon next logon. Modifying is unsafe.";
+                item.Impact = StartupImpact.Medium;
+                return;
+            }
+
             var combined = (item.Name + " " + item.CommandLine + " " + item.Publisher).ToLowerInvariant();
 
             // 1. Office Check - strictly protected
@@ -168,7 +187,17 @@ namespace Squirrel.Core.Processes
                 return;
             }
 
-            // 4. Cloud Storage
+            // 4. Windows Accessibility Tools
+            if (combined.Contains("osk.exe") || combined.Contains("narrator.exe") || combined.Contains("magnify.exe") || combined.Contains("atbroker.exe"))
+            {
+                item.Category = "Accessibility";
+                item.CanSafelyDisable = false;
+                item.SafetyExplanation = "Windows accessibility tool — must remain available.";
+                item.Impact = StartupImpact.Low;
+                return;
+            }
+
+            // 5. Cloud Storage
             if (combined.Contains("onedrive") || combined.Contains("dropbox") || combined.Contains("googledrive") || combined.Contains("box sync"))
             {
                 item.Category = "Cloud Storage";
@@ -178,7 +207,7 @@ namespace Squirrel.Core.Processes
                 return;
             }
 
-            // 5. Communication & Heavy Apps
+            // 6. Communication & Heavy Apps
             if (combined.Contains("discord") || combined.Contains("teams") || combined.Contains("slack") ||
                 combined.Contains("spotify") || combined.Contains("steam") || combined.Contains("skype"))
             {
@@ -189,7 +218,7 @@ namespace Squirrel.Core.Processes
                 return;
             }
 
-            // 6. Updaters & Utilities
+            // 7. Updaters & Utilities
             if (combined.Contains("update") || combined.Contains("helper") || combined.Contains("launcher"))
             {
                 item.Category = "Application Updater";

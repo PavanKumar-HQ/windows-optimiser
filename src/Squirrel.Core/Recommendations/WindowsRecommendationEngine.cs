@@ -35,11 +35,11 @@ namespace Squirrel.Core.Recommendations
                     {
                         recommendations.Add(new Recommendation
                         {
-                            Title = $"Mitigate High CPU Usage from '{offender.ProcessName}'",
+                            Title = $"Investigate Background CPU Draw from '{offender.ProcessName}'",
                             Category = RecommendationCategory.CpuBottleneck,
-                            Explanation = $"The process '{offender.ProcessName}' is persistently consuming CPU resources across repeated measurements.",
-                            Evidence = $"Averaged {offender.AverageCpuPercent:F1}% CPU (peak {offender.PeakCpuPercent:F1}%) across {offender.HighCpuSampleCount} of {offender.TotalSamplesObserved} samples on your 2-core AMD APU.",
-                            ExpectedBenefit = $"Reclaiming ~{offender.AverageCpuPercent:F0}% CPU will directly alleviate system lag and responsiveness bottlenecks.",
+                            Explanation = $"The process '{offender.ProcessName}' demonstrated persistent background CPU activity across repeated measurements.",
+                            Evidence = $"Averaged {offender.AverageCpuPercent:F1}% system CPU (~{offender.SingleCoreEquivalentPercent:F0}% of a single core) across {offender.HighCpuSampleCount} of {offender.TotalSamplesObserved} samples on your 2-core AMD APU.",
+                            ExpectedBenefit = $"Closing or configuring '{offender.ProcessName}' may reduce background CPU draw, helping active foreground applications respond faster.",
                             RiskLevel = ActionRiskLevel.Low,
                             RequiresUserApproval = true
                         });
@@ -48,11 +48,11 @@ namespace Squirrel.Core.Recommendations
                     {
                         recommendations.Add(new Recommendation
                         {
-                            Title = "Limit Windows Search Indexer Scope",
+                            Title = "Limit Windows Search Indexer Scope via Windows Settings",
                             Category = RecommendationCategory.CpuBottleneck,
-                            Explanation = "Windows Search is indexing files in the background, consuming substantial CPU on dual-core processors.",
-                            Evidence = $"SearchIndexer averaged {offender.AverageCpuPercent:F1}% CPU across {offender.HighCpuSampleCount} samples.",
-                            ExpectedBenefit = "Limiting indexing to user profile folders only (via Indexing Options in Control Panel) stops excessive background drive crawls without breaking Start Menu search.",
+                            Explanation = "Windows Search is indexing files in the background, drawing CPU time on this dual-core processor.",
+                            Evidence = $"SearchIndexer averaged {offender.AverageCpuPercent:F1}% system CPU across {offender.HighCpuSampleCount} samples.",
+                            ExpectedBenefit = "Limiting indexing to essential user folders in Windows Settings > Search > Searching Windows reduces background disk and CPU activity without disabling search functionality.",
                             RiskLevel = ActionRiskLevel.Safe,
                             RequiresUserApproval = true
                         });
@@ -71,8 +71,8 @@ namespace Squirrel.Core.Recommendations
                         Title = $"Disable Startup for '{item.Name}'",
                         Category = RecommendationCategory.StartupOptimization,
                         Explanation = item.SafetyExplanation,
-                        Evidence = $"Configured to start at boot ({item.LocationType}: {item.CommandLine}). Marked as {item.Impact} startup impact.",
-                        ExpectedBenefit = "Reduces boot time and eliminates background memory footprint on startup. The app remains fully functional when opened manually.",
+                        Evidence = $"Configured to launch automatically on logon ({item.LocationType}: {item.CommandLine}). Marked as {item.Impact} impact.",
+                        ExpectedBenefit = "Stops the program from loading into RAM and consuming background CPU on boot. The program remains fully functional when opened manually.",
                         RiskLevel = ActionRiskLevel.Safe,
                         RequiresUserApproval = true,
                         Action = new DisableStartupItemAction(item, _auditLedger)
@@ -85,11 +85,11 @@ namespace Squirrel.Core.Recommendations
             {
                 recommendations.Add(new Recommendation
                 {
-                    Title = "Address Elevated Memory Utilization",
+                    Title = "Review Elevated Memory Utilization",
                     Category = RecommendationCategory.MemoryOptimization,
                     Explanation = $"System is utilizing {currentMetrics.UsedMemoryMb:F0} MB of {currentMetrics.TotalMemoryMb:F0} MB RAM ({currentMetrics.MemoryUsagePercent:F1}%).",
-                    Evidence = $"Only {currentMetrics.AvailableMemoryMb:F0} MB RAM available. On an 8 GB system with shared AMD GPU graphics, memory pressure triggers disk paging.",
-                    ExpectedBenefit = "Closing unneeded background applications reduces SSD paging and improves active window responsiveness.",
+                    Evidence = $"Only {currentMetrics.AvailableMemoryMb:F0} MB RAM available. On an 8 GB system with shared AMD GPU graphics, memory pressure increases SSD paging.",
+                    ExpectedBenefit = "Closing unneeded background applications frees RAM and reduces SSD paging activity, which may help responsiveness.",
                     RiskLevel = ActionRiskLevel.Safe,
                     RequiresUserApproval = true
                 });
@@ -100,17 +100,17 @@ namespace Squirrel.Core.Recommendations
             {
                 recommendations.Add(new Recommendation
                 {
-                    Title = "Review and Clean Temporary Cache Files",
+                    Title = "Review Genuinely Safe Temporary Files",
                     Category = RecommendationCategory.SafeStorageCleanup,
-                    Explanation = "Genuinely safe temporary files and update caches were detected. Personal files and Microsoft Office are strictly protected.",
-                    Evidence = $"Found {storageReport.TotalReclaimableMb:F1} MB in {storageReport.Targets.Count} safe targets (e.g. user temp, crash dumps).",
-                    ExpectedBenefit = $"Reclaims {storageReport.TotalReclaimableMb:F1} MB of storage space on SSD. Note: Storage cleaning frees disk space but does not resolve CPU bottlenecks.",
+                    Explanation = "Safe temporary application workspace files and crash dumps were identified. Personal files and Microsoft Office are strictly protected.",
+                    Evidence = $"Found {storageReport.TotalReclaimableMb:F1} MB across verified safe cleanup categories (user temp, crash dumps).",
+                    ExpectedBenefit = $"Reclaims {storageReport.TotalReclaimableMb:F1} MB of SSD space. Note: Storage cleaning frees disk space but does not solve CPU bottlenecks.",
                     RiskLevel = ActionRiskLevel.Safe,
                     RequiresUserApproval = true
                 });
             }
 
-            // 5. Windows Responsiveness (Power Plan & Visual Effects on dual-core APU)
+            // 5. Windows Responsiveness (Power Plan on dual-core APU)
             recommendations.Add(new Recommendation
             {
                 Title = "Maintain Balanced Power Plan for Dual-Core AMD APU",

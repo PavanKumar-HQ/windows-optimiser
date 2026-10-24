@@ -44,7 +44,7 @@ namespace Squirrel.Core.Audit
             {
                 var entries = await LoadEntriesInternalAsync();
                 entries.Add(entry);
-                await SaveEntriesInternalAsync(entries);
+                await SaveEntriesAtomicAsync(entries);
             }
             finally
             {
@@ -75,7 +75,7 @@ namespace Squirrel.Core.Audit
                 if (target == null) return false;
 
                 target.Status = "Reverted";
-                await SaveEntriesInternalAsync(entries);
+                await SaveEntriesAtomicAsync(entries);
                 return true;
             }
             finally
@@ -103,7 +103,7 @@ namespace Squirrel.Core.Audit
             }
         }
 
-        private async Task SaveEntriesInternalAsync(List<AuditEntry> entries)
+        private async Task SaveEntriesAtomicAsync(List<AuditEntry> entries)
         {
             var dir = Path.GetDirectoryName(_filePath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -111,8 +111,17 @@ namespace Squirrel.Core.Audit
                 Directory.CreateDirectory(dir);
             }
 
-            using var stream = File.Create(_filePath);
-            await JsonSerializer.SerializeAsync(stream, entries, JsonOptions);
+            // Atomic write: Write to a unique temporary file, flush, and atomically replace the destination
+            // This prevents file corruption or zero-byte truncation if an interruption occurs during write.
+            var tempPath = _filePath + ".tmp." + Guid.NewGuid().ToString("N");
+
+            using (var stream = File.Create(tempPath))
+            {
+                await JsonSerializer.SerializeAsync(stream, entries, JsonOptions);
+                await stream.FlushAsync();
+            }
+
+            File.Move(tempPath, _filePath, overwrite: true);
         }
     }
 }

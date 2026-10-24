@@ -37,13 +37,32 @@ namespace Squirrel.Core.Tests
         }
 
         [Fact]
+        public async Task CleanTargetAsync_CategoryDisabled_RejectsExecution()
+        {
+            var cleaner = new SafeStorageCleaner(_ledger);
+            var target = new CleanupTarget
+            {
+                Name = "Windows Update Download Cache",
+                DirectoryPath = _targetDir,
+                IsSafeForCleanup = false,
+                SafetyNotes = "Disabled for direct deletion. Use Windows Settings."
+            };
+
+            var result = await cleaner.CleanTargetAsync(target, userConfirmed: true, dryRun: false);
+
+            Assert.False(result.Succeeded);
+            Assert.Contains("disabled", result.Warnings[0], StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
         public async Task CleanTargetAsync_WithoutUserConfirmation_AbortsExecution()
         {
             var cleaner = new SafeStorageCleaner(_ledger);
             var target = new CleanupTarget
             {
                 Name = "Test Temp",
-                DirectoryPath = _targetDir
+                DirectoryPath = _targetDir,
+                IsSafeForCleanup = true
             };
 
             var result = await cleaner.CleanTargetAsync(target, userConfirmed: false, dryRun: false);
@@ -62,7 +81,8 @@ namespace Squirrel.Core.Tests
             var target = new CleanupTarget
             {
                 Name = "Test Temp",
-                DirectoryPath = _targetDir
+                DirectoryPath = _targetDir,
+                IsSafeForCleanup = true
             };
 
             var result = await cleaner.CleanTargetAsync(target, userConfirmed: true, dryRun: true);
@@ -70,6 +90,7 @@ namespace Squirrel.Core.Tests
             Assert.True(result.Succeeded);
             Assert.True(result.IsDryRun);
             Assert.Equal(1, result.DeletedFilesCount);
+            Assert.Contains("DRY RUN", result.Summary);
             Assert.True(File.Exists(filePath), "Dry run must NOT delete files from disk.");
         }
 
@@ -84,6 +105,7 @@ namespace Squirrel.Core.Tests
             {
                 Name = "Test Temp",
                 DirectoryPath = _targetDir,
+                IsSafeForCleanup = true,
                 FileCount = 1,
                 SizeBytes = 16
             };
@@ -118,7 +140,8 @@ namespace Squirrel.Core.Tests
                 var target = new CleanupTarget
                 {
                     Name = "Test Temp",
-                    DirectoryPath = _targetDir
+                    DirectoryPath = _targetDir,
+                    IsSafeForCleanup = true
                 };
 
                 var result = await cleaner.CleanTargetAsync(target, userConfirmed: true, dryRun: false);
@@ -129,6 +152,40 @@ namespace Squirrel.Core.Tests
                 Assert.False(File.Exists(freeFilePath));
                 Assert.True(File.Exists(lockedFilePath));
             }
+        }
+
+        [Fact]
+        public async Task CleanTargetAsync_ReparsePointsAndSymlinks_AreSkippedWithoutTraversing()
+        {
+            var externalDir = Path.Combine(_testRoot, "external_safe_data");
+            Directory.CreateDirectory(externalDir);
+            var criticalFile = Path.Combine(externalDir, "important_doc.pdf");
+            File.WriteAllText(criticalFile, "CRITICAL USER DOCUMENT");
+
+            var symlinkDir = Path.Combine(_targetDir, "junction_to_external");
+            try
+            {
+                Directory.CreateSymbolicLink(symlinkDir, externalDir);
+            }
+            catch (Exception)
+            {
+                // If the OS environment lacks symlink creation privileges, skip test
+                return;
+            }
+
+            var cleaner = new SafeStorageCleaner(_ledger);
+            var target = new CleanupTarget
+            {
+                Name = "Test Temp",
+                DirectoryPath = _targetDir,
+                IsSafeForCleanup = true
+            };
+
+            var result = await cleaner.CleanTargetAsync(target, userConfirmed: true, dryRun: false);
+
+            Assert.True(result.Succeeded);
+            Assert.True(File.Exists(criticalFile), "Safe cleaner must NEVER delete files through a directory junction/symlink.");
+            Assert.True(result.SkippedFilesCount >= 1, "Cleaner must skip reparse points.");
         }
     }
 }

@@ -329,54 +329,71 @@ namespace Squirrel.Cli
             if (input == "D")
             {
                 Console.WriteLine("\n--- SIMULATING CLEANUP (DRY RUN) ---");
-                foreach (var t in report.Targets)
+                foreach (var t in report.Targets.Where(target => target.IsSafeForCleanup))
                 {
                     var res = await StorageCleaner.CleanTargetAsync(t, userConfirmed: true, dryRun: true);
-                    Console.WriteLine($"[Dry Run] {t.Name}: Would remove {res.DeletedFilesCount} files ({res.DeletedMb:F1} MB). Skipped: {res.SkippedFilesCount}");
+                    Console.WriteLine($"[Dry Run] {t.Name}: Evaluated {res.DeletedFilesCount} candidate files ({res.DeletedMb:F1} MB). Skipped: {res.SkippedFilesCount}");
                 }
-                Console.WriteLine("\nDry run complete. No files were removed.");
+                Console.WriteLine("\nDry run complete. No files were removed from disk.");
             }
             else if (input == "A")
             {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.Write("\nType 'CONFIRM' to execute cleanup on all approved safe targets: ");
-                Console.ResetColor();
-                if (Console.ReadLine()?.Trim() == "CONFIRM")
+                var safeTargets = report.Targets.Where(t => t.IsSafeForCleanup).ToList();
+                if (safeTargets.Count == 0)
                 {
-                    long totalReclaimed = 0;
-                    int totalFiles = 0;
-                    foreach (var t in report.Targets)
-                    {
-                        var res = await StorageCleaner.CleanTargetAsync(t, userConfirmed: true, dryRun: false);
-                        totalReclaimed += res.DeletedBytes;
-                        totalFiles += res.DeletedFilesCount;
-                        Console.WriteLine($"Cleaned {t.Name}: {res.DeletedFilesCount} files ({res.DeletedMb:F1} MB reclaimed). In-use skipped: {res.SkippedFilesCount}");
-                    }
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"\nCleanup Completed: Reclaimed {totalReclaimed / (1024.0 * 1024.0):F1} MB across {totalFiles} files.");
-                    Console.ResetColor();
+                    Console.WriteLine("No targets are currently eligible for direct cleanup.");
                 }
                 else
                 {
-                    Console.WriteLine("Cleanup cancelled.");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.Write($"\nType 'CONFIRM' to execute cleanup on {safeTargets.Count} approved safe targets: ");
+                    Console.ResetColor();
+                    if (Console.ReadLine()?.Trim() == "CONFIRM")
+                    {
+                        long totalReclaimed = 0;
+                        int totalFiles = 0;
+                        foreach (var t in safeTargets)
+                        {
+                            var res = await StorageCleaner.CleanTargetAsync(t, userConfirmed: true, dryRun: false);
+                            totalReclaimed += res.DeletedBytes;
+                            totalFiles += res.DeletedFilesCount;
+                            Console.WriteLine($"Cleaned {t.Name}: {res.DeletedFilesCount} files ({res.DeletedMb:F1} MB reclaimed). In-use/protected skipped: {res.SkippedFilesCount}");
+                        }
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine($"\nCleanup Completed: Reclaimed {totalReclaimed / (1024.0 * 1024.0):F1} MB across {totalFiles} files.");
+                        Console.ResetColor();
+                    }
+                    else
+                    {
+                        Console.WriteLine("Cleanup cancelled.");
+                    }
                 }
             }
             else if (int.TryParse(input, out int idx) && idx > 0 && idx <= report.Targets.Count)
             {
                 var t = report.Targets[idx - 1];
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.Write($"\nClean '{t.Name}' ({t.SizeMb:F1} MB)? (y/N): ");
-                Console.ResetColor();
-                if (Console.ReadLine()?.Trim().ToLowerInvariant() == "y")
+                if (!t.IsSafeForCleanup)
                 {
-                    var res = await StorageCleaner.CleanTargetAsync(t, userConfirmed: true, dryRun: false);
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine($"Cleaned {t.Name}: {res.DeletedFilesCount} files ({res.DeletedMb:F1} MB reclaimed). In-use skipped: {res.SkippedFilesCount}");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"\nNotice: '{t.Name}' is disabled for direct cleanup: {t.SafetyNotes}");
                     Console.ResetColor();
                 }
                 else
                 {
-                    Console.WriteLine("Cancelled.");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.Write($"\nClean '{t.Name}' ({t.SizeMb:F1} MB)? (y/N): ");
+                    Console.ResetColor();
+                    if (Console.ReadLine()?.Trim().ToLowerInvariant() == "y")
+                    {
+                        var res = await StorageCleaner.CleanTargetAsync(t, userConfirmed: true, dryRun: false);
+                        Console.ForegroundColor = ConsoleColor.Green;
+                        Console.WriteLine($"Cleaned {t.Name}: {res.DeletedFilesCount} files ({res.DeletedMb:F1} MB reclaimed). In-use skipped: {res.SkippedFilesCount}");
+                        Console.ResetColor();
+                    }
+                    else
+                    {
+                        Console.WriteLine("Cancelled.");
+                    }
                 }
             }
 

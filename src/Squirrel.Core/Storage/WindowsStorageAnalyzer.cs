@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -51,11 +52,19 @@ namespace Squirrel.Core.Storage
                     continue;
                 }
 
+                // If marked disabled (such as Windows Update cache), do not calculate as cleanable target
+                if (!target.IsSafeForCleanup)
+                {
+                    report.Targets.Add(target);
+                    continue;
+                }
+
                 // Verify safety guard
                 if (!SafetyGuard.IsPathSafeForCleanup(target.DirectoryPath, out var reason))
                 {
                     target.IsSafeForCleanup = false;
-                    target.SafetyNotes = $"Skipped: {reason}";
+                    target.SafetyNotes = $"Blocked: {reason}";
+                    report.Targets.Add(target);
                     continue;
                 }
 
@@ -89,10 +98,11 @@ namespace Squirrel.Core.Storage
             list.Add(new CleanupTarget
             {
                 Name = "User Temporary Files",
-                Description = "Temporary files created by running applications that were not removed upon closing.",
+                Description = "Temporary files created by closed applications. In-use and locked files are automatically skipped.",
                 DirectoryPath = userTemp,
-                SafetyNotes = "Safe to clean. In-use files are skipped automatically.",
-                RequiresAdmin = false
+                SafetyNotes = "Safe to clean. Skips active application files.",
+                RequiresAdmin = false,
+                IsSafeForCleanup = true
             });
 
             // 2. Windows Crash Dumps & Error Reports
@@ -100,10 +110,11 @@ namespace Squirrel.Core.Storage
             list.Add(new CleanupTarget
             {
                 Name = "Application Crash Dumps",
-                Description = "Memory dump files (.dmp) saved after application crashes.",
+                Description = "Post-crash memory dump files (.dmp). Safe to remove unless actively diagnosing a crash with a software vendor.",
                 DirectoryPath = crashDumps,
-                SafetyNotes = "Safe to delete. Only needed if you are debugging a software crash with a developer.",
-                RequiresAdmin = false
+                SafetyNotes = "Safe to delete. Only needed when debugging app crashes.",
+                RequiresAdmin = false,
+                IsSafeForCleanup = true
             });
 
             // 3. System Temp
@@ -111,46 +122,74 @@ namespace Squirrel.Core.Storage
             list.Add(new CleanupTarget
             {
                 Name = "Windows System Temp",
-                Description = "Temporary workspace used by Windows system services and installers.",
+                Description = "Temporary workspace used by Windows system services and installer packages.",
                 DirectoryPath = systemTemp,
                 SafetyNotes = "Safe to clean. Requires administrator privileges.",
-                RequiresAdmin = true
+                RequiresAdmin = true,
+                IsSafeForCleanup = true
             });
 
-            // 4. Windows Update Download Cache (SoftwareDistribution\Download)
+            // 4. Windows Update Download Cache — DISABLED FOR DIRECT DELETION
+            // Rationale: Deleting SoftwareDistribution\Download while Windows Update (wuauserv) or TrustedInstaller
+            // is actively staging updates can corrupt installations. Official, safe cleanup is provided via Windows Settings.
             var softwareDistribution = Path.Combine(winDir, "SoftwareDistribution", "Download");
             list.Add(new CleanupTarget
             {
                 Name = "Windows Update Download Cache",
                 Description = "Downloaded installation packages for completed Windows updates.",
                 DirectoryPath = softwareDistribution,
-                SafetyNotes = "Safe to remove after updates have installed. Windows will re-download if ever needed.",
-                RequiresAdmin = true
+                SafetyNotes = "Disabled for direct deletion. Deleting while Windows Update or TrustedInstaller is active can corrupt updates. Use Windows Settings > System > Storage > Temporary files > Windows Update Cleanup instead.",
+                RequiresAdmin = true,
+                IsSafeForCleanup = false,
+                IsSelectedForCleanup = false
             });
 
-            // 5. Microsoft Edge Browser Disk Cache (strictly Cache, never cookies/passwords/history)
+            // 5. Microsoft Edge Browser Disk Cache (strictly HTTP cache files, never cookies, history, or passwords)
             var edgeCache = Path.Combine(localAppData, "Microsoft", "Edge", "User Data", "Default", "Cache", "Cache_Data");
+            bool isEdgeRunning = IsProcessRunning("msedge");
             list.Add(new CleanupTarget
             {
                 Name = "Microsoft Edge Web Cache",
                 Description = "Cached web page images and scripts. Never affects your cookies, history, or saved passwords.",
                 DirectoryPath = edgeCache,
-                SafetyNotes = "Safe to clean. Temporary cache will be rebuilt naturally as you browse.",
-                RequiresAdmin = false
+                SafetyNotes = isEdgeRunning
+                    ? "Warning: Microsoft Edge is currently open. Close Edge before cleaning to prevent cache file lock errors."
+                    : "Safe to clean. Rebuilt automatically as you browse.",
+                RequiresAdmin = false,
+                IsSafeForCleanup = true
             });
 
-            // 6. Google Chrome Disk Cache (strictly Cache, never cookies/passwords/history)
+            // 6. Google Chrome Disk Cache (strictly HTTP cache files, never cookies, history, or passwords)
             var chromeCache = Path.Combine(localAppData, "Google", "Chrome", "User Data", "Default", "Cache", "Cache_Data");
+            bool isChromeRunning = IsProcessRunning("chrome");
             list.Add(new CleanupTarget
             {
                 Name = "Google Chrome Web Cache",
                 Description = "Cached web page images and scripts. Does not touch cookies, bookmarks, or login sessions.",
                 DirectoryPath = chromeCache,
-                SafetyNotes = "Safe to clean. Rebuilt as you browse.",
-                RequiresAdmin = false
+                SafetyNotes = isChromeRunning
+                    ? "Warning: Google Chrome is currently open. Close Chrome before cleaning to prevent cache file lock errors."
+                    : "Safe to clean. Rebuilt automatically as you browse.",
+                RequiresAdmin = false,
+                IsSafeForCleanup = true
             });
 
             return list;
+        }
+
+        private static bool IsProcessRunning(string processName)
+        {
+            try
+            {
+                var procs = Process.GetProcessesByName(processName);
+                var running = procs.Length > 0;
+                foreach (var p in procs) { try { p.Dispose(); } catch { } }
+                return running;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static void CalculateDirectoryFootprint(string dirPath, CleanupTarget target, CancellationToken cancellationToken)
@@ -177,6 +216,9 @@ namespace Squirrel.Core.Storage
                         {
                             try
                             {
+                                // Do not follow symbolic links
+                                if ((file.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+
                                 totalBytes += file.Length;
                                 count++;
                             }
@@ -187,6 +229,9 @@ namespace Squirrel.Core.Storage
                         {
                             try
                             {
+                                // CRITICAL: Never follow directory junctions, symlinks, or reparse points
+                                if ((subDir.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+
                                 stack.Push(subDir);
                             }
                             catch { }

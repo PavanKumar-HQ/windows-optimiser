@@ -11,12 +11,13 @@ namespace Squirrel.Core.Diagnostics
     /// <summary>
     /// Analyzes real CPU and memory usage using repeated samples to distinguish sustained bottlenecks from transient spikes.
     /// Tailored for dual-core systems (AMD A4-4350B) where a single sustained background task causes severe UI lag.
+    /// Resilient against PID reuse, process restarts, clock drift, and brief spikes.
     /// </summary>
     public class BottleneckDetector
     {
         private readonly ISystemMonitor _systemMonitor;
 
-        // On a 2-core machine, anything above 20% total CPU is consuming ~40% of an entire CPU core.
+        // On a 2-core machine, 15% total system CPU represents 30% of an entire CPU core.
         private const double SustainedProcessCpuThresholdPercent = 15.0;
 
         public BottleneckDetector(ISystemMonitor systemMonitor)
@@ -28,6 +29,7 @@ namespace Squirrel.Core.Diagnostics
         {
             public int ProcessId { get; set; }
             public string ProcessName { get; set; } = string.Empty;
+            public DateTime? StartTime { get; set; }
             public string MainWindowTitle { get; set; } = string.Empty;
             public TimeSpan LastTotalProcessorTime { get; set; }
             public double LastWorkingSetMb { get; set; }
@@ -56,22 +58,25 @@ namespace Squirrel.Core.Diagnostics
 
             progress?.Report($"Starting diagnostic baseline ({sampleCount} samples, {intervalMs / 1000.0:F1}s intervals)...");
 
-            DateTime previousWallTime = DateTime.UtcNow;
+            var intervalStopwatch = new Stopwatch();
 
             for (int i = 0; i < sampleCount; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var currentWallTime = DateTime.UtcNow;
-                var wallDeltaMs = (currentWallTime - previousWallTime).TotalMilliseconds;
-                previousWallTime = currentWallTime;
+                double elapsedMs = 0;
+                if (i > 0)
+                {
+                    intervalStopwatch.Stop();
+                    elapsedMs = intervalStopwatch.Elapsed.TotalMilliseconds;
+                }
 
                 var snapshot = _systemMonitor.GetSnapshot();
                 systemCpuSamples.Add(snapshot.TotalCpuPercent);
                 report.MemoryUsagePercent = snapshot.MemoryUsagePercent;
                 report.AvailableMemoryMb = snapshot.AvailableMemoryMb;
 
-                // Capture current processes
+                // Capture current running processes
                 var currentProcesses = Process.GetProcesses();
                 try
                 {
@@ -80,11 +85,18 @@ namespace Squirrel.Core.Diagnostics
                         try
                         {
                             var pid = proc.Id;
-                            if (pid == 0) continue; // Idle process
+                            if (pid == 0) continue; // Skip System Idle process
 
-                            var currentProcTime = proc.TotalProcessorTime;
-                            var currentWorkingSetMb = proc.WorkingSet64 / (1024.0 * 1024.0);
-                            var windowTitle = string.Empty;
+                            TimeSpan currentProcTime;
+                            try { currentProcTime = proc.TotalProcessorTime; } catch { continue; }
+
+                            double currentWorkingSetMb = 0;
+                            try { currentWorkingSetMb = proc.WorkingSet64 / (1024.0 * 1024.0); } catch { }
+
+                            DateTime? startTime = null;
+                            try { startTime = proc.StartTime; } catch { }
+
+                            string windowTitle = string.Empty;
                             try { windowTitle = proc.MainWindowTitle; } catch { }
 
                             if (!trackers.TryGetValue(pid, out var tracker))
@@ -93,6 +105,7 @@ namespace Squirrel.Core.Diagnostics
                                 {
                                     ProcessId = pid,
                                     ProcessName = proc.ProcessName,
+                                    StartTime = startTime,
                                     MainWindowTitle = windowTitle,
                                     LastTotalProcessorTime = currentProcTime,
                                     LastWorkingSetMb = currentWorkingSetMb
@@ -101,30 +114,51 @@ namespace Squirrel.Core.Diagnostics
                             }
                             else
                             {
-                                if (wallDeltaMs > 100)
+                                // Detect PID Reuse or Process Restart:
+                                // If process name or start time differs, or processor time went backwards,
+                                // this PID was reassigned to a new process. Reset tracker!
+                                bool isReassigned = !string.Equals(tracker.ProcessName, proc.ProcessName, StringComparison.OrdinalIgnoreCase) ||
+                                                    (startTime.HasValue && tracker.StartTime.HasValue && startTime.Value != tracker.StartTime.Value) ||
+                                                    currentProcTime < tracker.LastTotalProcessorTime;
+
+                                if (isReassigned)
+                                {
+                                    tracker.ProcessName = proc.ProcessName;
+                                    tracker.StartTime = startTime;
+                                    tracker.MainWindowTitle = windowTitle;
+                                    tracker.LastTotalProcessorTime = currentProcTime;
+                                    tracker.LastWorkingSetMb = currentWorkingSetMb;
+                                    tracker.CpuSamples.Clear();
+                                    tracker.HighCpuHits = 0;
+                                }
+                                else if (elapsedMs > 100)
                                 {
                                     var procDeltaMs = (currentProcTime - tracker.LastTotalProcessorTime).TotalMilliseconds;
-                                    var cpuPercent = (procDeltaMs / (wallDeltaMs * logicalCores)) * 100.0;
-                                    cpuPercent = Math.Clamp(cpuPercent, 0.0, 100.0);
-
-                                    tracker.CpuSamples.Add(cpuPercent);
-                                    if (cpuPercent >= SustainedProcessCpuThresholdPercent)
+                                    if (procDeltaMs >= 0)
                                     {
-                                        tracker.HighCpuHits++;
-                                    }
-                                }
+                                        // Normalized to total system CPU (0-100%)
+                                        var cpuPercent = (procDeltaMs / (elapsedMs * logicalCores)) * 100.0;
+                                        cpuPercent = Math.Clamp(cpuPercent, 0.0, 100.0);
 
-                                tracker.LastTotalProcessorTime = currentProcTime;
-                                tracker.LastWorkingSetMb = currentWorkingSetMb;
-                                if (!string.IsNullOrEmpty(windowTitle))
-                                {
-                                    tracker.MainWindowTitle = windowTitle;
+                                        tracker.CpuSamples.Add(cpuPercent);
+                                        if (cpuPercent >= SustainedProcessCpuThresholdPercent)
+                                        {
+                                            tracker.HighCpuHits++;
+                                        }
+                                    }
+
+                                    tracker.LastTotalProcessorTime = currentProcTime;
+                                    tracker.LastWorkingSetMb = currentWorkingSetMb;
+                                    if (!string.IsNullOrEmpty(windowTitle))
+                                    {
+                                        tracker.MainWindowTitle = windowTitle;
+                                    }
                                 }
                             }
                         }
                         catch
                         {
-                            // Process may have exited or access denied
+                            // Inaccessible or exited process
                         }
                     }
                 }
@@ -136,10 +170,11 @@ namespace Squirrel.Core.Diagnostics
                     }
                 }
 
-                progress?.Report($"Sample {i + 1}/{sampleCount} recorded: System CPU {snapshot.TotalCpuPercent:F1}%, RAM {snapshot.MemoryUsagePercent:F1}%");
+                progress?.Report($"Sample {i + 1}/{sampleCount} recorded: Total System CPU {snapshot.TotalCpuPercent:F1}%, RAM {snapshot.MemoryUsagePercent:F0}%");
 
                 if (i < sampleCount - 1)
                 {
+                    intervalStopwatch.Restart();
                     await Task.Delay(intervalMs, cancellationToken);
                 }
             }
@@ -171,7 +206,7 @@ namespace Squirrel.Core.Diagnostics
                     ProtectionReason = reason
                 };
 
-                // Classify: Sustained vs Transient
+                // Classify: Sustained vs Transient vs Normal
                 if (sample.IsSustainedOffender)
                 {
                     report.SustainedCpuOffenders.Add(sample);
@@ -214,15 +249,15 @@ namespace Squirrel.Core.Diagnostics
                 foreach (var offender in report.SustainedCpuOffenders)
                 {
                     var protText = offender.IsProtected ? $" [Protected: {offender.ProtectionReason}]" : " [User / Third-party App]";
-                    report.Findings.Add($"Sustained CPU Bottleneck: '{offender.ProcessName}' averaged {offender.AverageCpuPercent:F1}% CPU (peak {offender.PeakCpuPercent:F1}% across {offender.HighCpuSampleCount} of {offender.TotalSamplesObserved} samples){protText}.");
+                    report.Findings.Add($"Sustained CPU Bottleneck: '{offender.ProcessName}' averaged {offender.AverageCpuPercent:F1}% system CPU (~{offender.SingleCoreEquivalentPercent:F0}% of a single core) across {offender.HighCpuSampleCount} of {offender.TotalSamplesObserved} samples{protText}.");
 
                     if (!offender.IsProtected)
                     {
-                        report.EvidenceBasedSuggestions.Add($"Investigate or close '{offender.ProcessName}' — it is using {offender.AverageCpuPercent:F1}% of your dual-core CPU continuously.");
+                        report.EvidenceBasedSuggestions.Add($"Investigate or close '{offender.ProcessName}' — it is persistently drawing ~{offender.SingleCoreEquivalentPercent:F0}% of a core on your dual-core APU.");
                     }
                     else if (offender.ProcessName.Equals("SearchIndexer", StringComparison.OrdinalIgnoreCase))
                     {
-                        report.EvidenceBasedSuggestions.Add("Windows Search Indexer is actively indexing files. Consider pausing or reducing indexed locations in Windows Settings.");
+                        report.EvidenceBasedSuggestions.Add("Windows Search Indexer is actively indexing files. Consider limiting indexed locations in Windows Settings > Search > Searching Windows instead of disabling the service.");
                     }
                     else if (offender.ProcessName.Equals("MsMpEng", StringComparison.OrdinalIgnoreCase))
                     {
@@ -232,7 +267,13 @@ namespace Squirrel.Core.Diagnostics
             }
             else
             {
-                report.Findings.Add("No single process sustained abnormally high CPU across the sampling window.");
+                report.Findings.Add("No single process sustained abnormally high background CPU load across the sampling window.");
+            }
+
+            if (report.TransientSpikeProcesses.Count > 0)
+            {
+                var topTransient = report.TransientSpikeProcesses.First();
+                report.Findings.Add($"Brief CPU burst observed in '{topTransient.ProcessName}' (peak {topTransient.PeakCpuPercent:F1}%), but average was low ({topTransient.AverageCpuPercent:F1}%). This was a normal momentary spike, not a sustained bottleneck.");
             }
 
             if (report.HasMemoryPressure)

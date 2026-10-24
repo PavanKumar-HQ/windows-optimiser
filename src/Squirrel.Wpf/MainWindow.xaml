@@ -351,12 +351,12 @@
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
 
-                                            <CheckBox IsChecked="{Binding IsSelectedForCleanup}" VerticalAlignment="Center" Margin="0,0,16,0" />
+                                            <CheckBox IsChecked="{Binding IsSelectedForCleanup}" IsEnabled="{Binding IsSafeForCleanup}" VerticalAlignment="Center" Margin="0,0,16,0" />
 
                                             <StackPanel Grid.Column="1">
                                                 <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="Bold" Foreground="{StaticResource TextPrimary}" Margin="0,0,0,2" />
                                                 <TextBlock Text="{Binding Description}" FontSize="11" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,4" TextWrapping="Wrap" />
-                                                <TextBlock Text="{Binding SafetyNotes}" FontSize="11" Foreground="{StaticResource SuccessGreen}" />
+                                                <TextBlock Text="{Binding SafetyNotes}" FontSize="11" Foreground="{StaticResource WarningAmber}" TextWrapping="Wrap" />
                                             </StackPanel>
 
                                             <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center">
