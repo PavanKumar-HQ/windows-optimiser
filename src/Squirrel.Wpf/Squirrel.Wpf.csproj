@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationTitle>Squirrel — Personal Laptop Diagnostic &amp; Optimizer</ApplicationTitle>
+    <AssemblyTitle>Squirrel</AssemblyTitle>
+    <Product>Squirrel</Product>
+    <Company>Personal Use (LapMac)</Company>
+    <Description>Personal Windows Laptop Diagnostic and Responsiveness Utility</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Squirrel.Core\Squirrel.Core.csproj" />
+  </ItemGroup>
+
+</Project>

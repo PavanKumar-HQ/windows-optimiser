@@ -1,0 +1,14 @@
+## .NET & Build Artifacts
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vscode/
+.idea/
+
+## OS specific
+.DS_Store
+Thumbs.db
